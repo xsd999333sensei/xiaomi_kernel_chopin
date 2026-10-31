@@ -19,7 +19,7 @@ RELEASE_DIR="$KERNEL_DIR/release"
 CROSS_COMPILE_PATH="aarch64-linux-gnu-"
 CROSS_COMPILE_ARM32_PATH="arm-linux-gnueabi-"
 
-KERNEL_VERSION="Clang13"
+KERNEL_VERSION="@Xiaonai-@小阮sensei"
 CLANG_VERSION="13"
 
 # ==================== 工具函数 ====================
