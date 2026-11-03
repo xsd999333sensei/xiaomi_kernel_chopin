@@ -579,11 +579,3 @@ source "drivers/misc/echo/Kconfig"
 source "drivers/misc/cxl/Kconfig"
 source "drivers/misc/mediatek/Kconfig"
 endmenu
-
-config CHOPIN66_MARKS
-	bool "Read back the Linux 6.6 chopin boot markers"
-	default y
-	help
-	  Expose the CHOPIN66MARK string that a Linux 6.6 probe kernel leaves in
-	  the preloader reserved ramoops console zone (physical 0x48090000) via
-	  /proc/chopin66_marks and dmesg. Read only, no side effects.
