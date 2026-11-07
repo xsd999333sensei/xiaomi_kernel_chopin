@@ -1205,10 +1205,15 @@ static bool cmdline_override;
 static int cached_android_sdk = -1;
 static bool android_sdk_probed;
 
+#define ANDROID_SDK_KEY "ro.build.version.sdk="
+#define SDK_CHUNK 512
+#define SDK_OVERLAP 64
+
 /*
  * 读 /system/build.prop 逐块找 ro.build.version.sdk。
  * 1) 不再只看前 2KB —— 属性行可能在后半段；
- * 2) 解析结果校验范围，避免缓冲区边界把 37 截成 3；
+ * 2) 块间保留尾部重叠，且数字必须后跟行尾才算完整 ——
+ *    否则跨块边界会把 37 截成 3，或整条属性被漏掉；
  * 3) 失败也缓存，否则任意进程 prctl 改名成 netd 就能反复触发内核 filp_open。
  */
 static int detect_android_sdk(void)
@@ -1216,7 +1221,8 @@ static int detect_android_sdk(void)
 	struct file *f;
 	loff_t pos = 0;
 	ssize_t n;
-	char buf[512];
+	char buf[SDK_CHUNK + SDK_OVERLAP + 1];
+	size_t keep = 0;
 	int sdk = -1;
 
 	if (android_sdk_probed)
@@ -1226,19 +1232,31 @@ static int detect_android_sdk(void)
 	if (IS_ERR(f))
 		goto out;
 
-	while ((n = kernel_read(f, buf, sizeof(buf) - 1, &pos)) > 0) {
-		char *p;
-		int val;
+	while ((n = kernel_read(f, buf + keep, SDK_CHUNK, &pos)) > 0) {
+		char *p, *end;
+		size_t used = keep + n;
+		long val = 0;
 
-		buf[n] = '\0';
-		p = strstr(buf, "ro.build.version.sdk=");
-		if (!p)
-			continue;
-		p += strlen("ro.build.version.sdk=");
-		val = simple_strtol(p, NULL, 10);
-		if (val > 0 && val < 100)
-			sdk = val;
-		break;
+		buf[used] = '\0';
+		p = strstr(buf, ANDROID_SDK_KEY);
+		if (p) {
+			p += strlen(ANDROID_SDK_KEY);
+			for (end = p; *end >= '0' && *end <= '9'; end++)
+				;
+			if (end != p && (*end == '\n' || *end == '\r') &&
+			    !kstrtol(p, 10, &val) && val > 0 && val < 100) {
+				sdk = val;
+				break;
+			}
+		}
+
+		/* 保留尾部，防止属性名/值正好跨在块边界上 */
+		if (used > SDK_OVERLAP) {
+			memmove(buf, buf + used - SDK_OVERLAP, SDK_OVERLAP);
+			keep = SDK_OVERLAP;
+		} else {
+			keep = used;
+		}
 	}
 	filp_close(f, NULL);
 
@@ -1342,9 +1360,14 @@ SYSCALL_DEFINE1(uname, struct old_utsname __user *, name)
 	up_read(&uts_sem);
 
 	/* 与 newuname 保持一致：老的 uname 视图也要伪装，否则 ABI 不一致 */
-	if (fake_release_for(current))
-		strncpy(tmp.release, fake_release_for(current),
-			sizeof(tmp.release) - 1);
+	{
+		const char *fake = fake_release_for(current);
+
+		if (fake) {
+			strncpy(tmp.release, fake, sizeof(tmp.release) - 1);
+			tmp.release[sizeof(tmp.release) - 1] = '\0';
+		}
+	}
 
 	if (copy_to_user(name, &tmp, sizeof(tmp)))
 		return -EFAULT;
@@ -2491,14 +2514,14 @@ extern int ksu_handle_susfs_prctl(int option, unsigned long arg2,
 SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		unsigned long, arg4, unsigned long, arg5)
 {
+	struct task_struct *me = current;
+	unsigned char comm[sizeof(me->comm)];
+	long error;
+
 #ifdef CONFIG_KSU
 	if (ksu_handle_susfs_prctl(option, arg2, arg3, arg4, arg5))
 		return 0;
 #endif
-
-	struct task_struct *me = current;
-	unsigned char comm[sizeof(me->comm)];
-	long error;
 
 	error = security_task_prctl(option, arg2, arg3, arg4, arg5);
 	if (error != -ENOSYS)
