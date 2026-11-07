@@ -7,6 +7,8 @@ KERNEL_DIR="$HOME/xiaomi_kernel_chopin"
 # A17 用的完整配置（chopin_defconfig 缺 28+ 个 MTK 驱动项，会卡在早期 init）
 DEFCONFIG="chopin_a17_defconfig"
 RELEASE_DIR="$KERNEL_DIR/release"
+# 移植项目输出目录：只保留最新 boot，twrp/recovery 不参与清理
+PORT_DIR="${PORT_DIR:-/home/ruker/port/chopin_os4/out}"
 
 # Ubuntu 系统交叉编译工具链
 CROSS_COMPILE_PATH="aarch64-linux-gnu-"
@@ -69,6 +71,8 @@ build_kernel() {
         sed -i 's/^CONFIG_COMMON_CLK_MT8183=y/# CONFIG_COMMON_CLK_MT8183 is not set/' "$config"
         sed -i 's/^CONFIG_PINCTRL_MT8183=y/# CONFIG_PINCTRL_MT8183 is not set/' "$config"
         sed -i 's/^CONFIG_MTK_AEE_IPANIC=y/# CONFIG_MTK_AEE_IPANIC is not set/' "$config"
+        sed -i 's/^CONFIG_PANIC_ON_OOPS=y/# CONFIG_PANIC_ON_OOPS is not set/' "$config"
+        sed -i 's/^CONFIG_PANIC_TIMEOUT=.*/CONFIG_PANIC_TIMEOUT=0/' "$config"
         echo "  缺失源文件配置已禁用"
     fi
 
@@ -185,11 +189,10 @@ add_erofs_to_fstab() {
 
     # 定义需要添加 erofs 的分区及其对应的 ext4 行匹配模式
     # 格式: "分区名|挂载点|erofs选项|匹配的ext4行关键词"
+    # 本移植只有 system/product/system_ext 是 erofs；vendor/mi_ext 仍是原厂 ext4
     local partitions=(
         "system|/system|ro wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,avb_keys=/avb/q-gsi.avbpubkey:/avb/r-gsi.avbpubkey:/avb/s-gsi.avbpubkey|^system .* ext4"
-        "vendor|/vendor|ro wait,slotselect,avb,logical,first_stage_mount|^vendor .* ext4"
         "product|/product|ro wait,slotselect,avb,logical,first_stage_mount|^product .* ext4"
-        "mi_ext|/mnt/vendor/mi_ext|ro wait,slotselect,avb=vbmeta,logical,first_stage_mount,nofail|^mi_ext .* ext4"
         "system_ext|/system_ext|ro wait,avb,logical,first_stage_mount,slotselect|^system_ext .* ext4"
     )
 
@@ -386,8 +389,38 @@ pack_img() {
         python3 "$KERNEL_DIR/scripts/patch_boot_cmdline.py" "$out" "androidboot.selinux=enforcing" \
             || warn "cmdline 适配失败（底包可能不是标准 Android boot header）"
     fi
+    echo "   包内 kernel sha256: $(sha256sum kernel | cut -d' ' -f1)"
+    # 只保留最新一个 boot：除本次输出外全部删除。
+    local _old
+    while IFS= read -r _old; do
+        [ -z "$_old" ] && continue
+        [ "$(basename "$_old")" = "$(basename "$out")" ] && continue
+        rm -f "$_old" && echo "   删除旧包: $(basename "$_old")"
+    done < <(ls -t "$RELEASE_DIR"/boot-*.img 2>/dev/null)
     ok "boot.img: $out"
     cd "$boot_dir" && rm -rf "$tmp"
+}
+
+# ==================== 只保留最新 boot ====================
+cleanup_old_boots() {
+    local dirs=("$RELEASE_DIR" "$PORT_DIR")
+    local d f first
+    for d in "${dirs[@]}"; do
+        [ -d "$d" ] || continue
+        first=1
+        while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$(basename "$f")" in
+                twrp*|*recovery*) continue ;;
+            esac
+            if [ "$first" -eq 1 ]; then
+                first=0
+                echo "   保留最新 boot: $(basename "$f")"
+                continue
+            fi
+            rm -f "$f" && echo "   删除旧 boot: $(basename "$f")" || warn "删除失败: $f"
+        done < <(ls -t "$d"/boot*.img 2>/dev/null)
+    done
 }
 
 # ==================== 一次性依赖安装 ====================
@@ -471,15 +504,16 @@ read -p "版本名 (默认 $KERNEL_VERSION): " v
 [ -n "$v" ] && KERNEL_VERSION="$v"
 
 echo ""
-echo "1) 编译+打包  2) 仅编译  3) 仅打包  4) 清理旧日志  5) 查看最近错误"
+echo "1) 编译+打包  2) 仅编译  3) 仅打包  4) 清理旧日志  5) 查看最近错误  6) 只留最新 boot"
 read -p "选择: " c
 
 case $c in
-    1) build_kernel && pack_img ;;
-    2) build_kernel ;;
-    3) pack_img ;;
+    1) build_kernel && pack_img && cleanup_old_boots ;;
+    2) build_kernel && cleanup_old_boots ;;
+    3) pack_img && cleanup_old_boots ;;
     4) clean_logs ;;
     5) show_error ;;
+    6) cleanup_old_boots ;;
     *) echo "无效选择" ;;
 esac
 
